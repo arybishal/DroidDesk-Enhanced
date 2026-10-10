@@ -32,6 +32,7 @@ import com.termux.x11.LorieView
 import com.orailnoor.droiddesk.runtime.LinuxRuntime
 import com.orailnoor.droiddesk.runtime.ChrootRuntime
 import com.orailnoor.droiddesk.runtime.ClipboardSync
+import com.orailnoor.droiddesk.runtime.XfceMobileProfile
 import com.orailnoor.droiddesk.x11.X11ServiceClient
 import com.orailnoor.droiddesk.x11.X11InputController
 
@@ -100,10 +101,19 @@ class DesktopActivity : Activity() {
 
     companion object {
         private const val TAG = "DesktopActivity"
+        private var current: java.lang.ref.WeakReference<DesktopActivity>? = null
+
+        fun isOpen(): Boolean = current?.get()?.isFinishing == false
+
+        /** Closes the desktop screen, e.g. when the session is stopped from the notification. */
+        fun finishIfOpen() {
+            current?.get()?.let { activity -> activity.runOnUiThread { activity.finish() } }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        current = java.lang.ref.WeakReference(this)
         linuxRuntime = LinuxRuntime(this)
         chrootRuntime = ChrootRuntime(this)
         shouldStartSession = intent.getBooleanExtra("startSession", false)
@@ -259,7 +269,7 @@ class DesktopActivity : Activity() {
 
     private fun attachDesktopInput() {
         if (inputController == null) {
-            inputController = X11InputController(lorieView!!)
+            inputController = X11InputController(lorieView!!, onThreeFingerTap = ::showKeyboard)
         }
         addDesktopControls()
         lorieView?.requestFocus()
@@ -278,7 +288,7 @@ class DesktopActivity : Activity() {
             isAllCaps = false
             minWidth = 0
             minHeight = 0
-            textSize = 12f
+            textSize = 13f
             setTextColor(Color.WHITE)
             setPadding((12 * density).toInt(), 0, (12 * density).toInt(), 0)
             backgroundTintList = ColorStateList.valueOf(Color.argb(220, 28, 38, 52))
@@ -286,9 +296,11 @@ class DesktopActivity : Activity() {
             text = label
         }
 
+        // Icon-only buttons get a full touch target; they looked cut off when only as wide as their glyph.
+        val iconButtonWidth = (44 * density).toInt()
         val dragHandle = controlButton("⋮").apply {
             contentDescription = "Drag desktop controls"
-            setPadding((8 * density).toInt(), 0, (8 * density).toInt(), 0)
+            minWidth = iconButtonWidth
         }
         val keyboardButton = controlButton("Keyboard").apply {
             setOnClickListener { showKeyboard() }
@@ -303,58 +315,60 @@ class DesktopActivity : Activity() {
         val hideButton = controlButton("−").apply {
             contentDescription = "Hide desktop controls"
             setOnClickListener { setControlsCollapsed(true) }
-            setPadding((9 * density).toInt(), 0, (9 * density).toInt(), 0)
+            minWidth = iconButtonWidth
         }
 
+        val buttonHeight = (44 * density).toInt()
         controlOverlay = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(dragHandle, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
+                LinearLayout.LayoutParams.WRAP_CONTENT, buttonHeight,
             ))
             addView(keyboardButton, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
+                LinearLayout.LayoutParams.WRAP_CONTENT, buttonHeight,
             ))
             addView(inputModeButton, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
+                LinearLayout.LayoutParams.WRAP_CONTENT, buttonHeight,
             ))
             addView(hideButton, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, (42 * density).toInt(),
+                LinearLayout.LayoutParams.WRAP_CONTENT, buttonHeight,
             ))
+            // Start collapsed so the bar never covers windows until the user asks for it.
+            visibility = View.INVISIBLE
         }
 
         collapsedControl = controlButton("☰").apply {
             contentDescription = "Show desktop controls"
-            // Keep this measured so switching from a dragged full overlay can
-            // copy absolute coordinates without placing the restore handle off-screen.
-            visibility = View.INVISIBLE
+            if (!desktopRevealed) visibility = View.INVISIBLE
         }
 
+        // Sit just above XFCE's bottom dock, which is scaled up with the X11 display.
+        val dockHeight = XfceMobileProfile.DOCK_SIZE_PX * X11InputController.DISPLAY_SCALE_PERCENT / 100
         val overlayParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.TOP or Gravity.END,
+            Gravity.BOTTOM or Gravity.END,
         ).apply {
             rightMargin = (8 * density).toInt()
-            topMargin = (52 * density).toInt()
+            bottomMargin = dockHeight + (8 * density).toInt()
         }
         val collapsedParams = FrameLayout.LayoutParams(
             (48 * density).toInt(),
-            (42 * density).toInt(),
-            Gravity.TOP or Gravity.END,
+            buttonHeight,
+            Gravity.BOTTOM or Gravity.END,
         ).apply {
             rightMargin = overlayParams.rightMargin
-            topMargin = overlayParams.topMargin
+            bottomMargin = overlayParams.bottomMargin
         }
 
         placeholder.addView(controlOverlay, overlayParams)
         placeholder.addView(collapsedControl, collapsedParams)
-        if (!desktopRevealed) controlOverlay?.visibility = View.INVISIBLE
         dragHandle.setOnTouchListener(dragListener(controlOverlay!!))
         collapsedControl?.setOnTouchListener(dragListener(collapsedControl!!) {
             setControlsCollapsed(false)
         })
-        controlOverlay?.bringToFront()
+        collapsedControl?.bringToFront()
     }
 
     private fun dragListener(target: View, onTap: (() -> Unit)? = null): View.OnTouchListener {
@@ -402,6 +416,15 @@ class DesktopActivity : Activity() {
         from?.visibility = View.INVISIBLE
         to?.visibility = View.VISIBLE
         to?.bringToFront()
+        // The expanded bar is wider than the ☰ handle; once laid out, keep it fully on screen.
+        to?.post { keepOnScreen(to) }
+    }
+
+    private fun keepOnScreen(view: View) {
+        val maxX = (placeholder.width - view.width).coerceAtLeast(0).toFloat()
+        val maxY = (placeholder.height - view.height).coerceAtLeast(0).toFloat()
+        view.x = view.x.coerceIn(0f, maxX)
+        view.y = view.y.coerceIn(0f, maxY)
     }
 
     private fun showKeyboard() {
@@ -546,8 +569,8 @@ class DesktopActivity : Activity() {
                 ?.setDuration(350)
                 ?.withEndAction {
                     loadingOverlay?.visibility = View.GONE
-                    controlOverlay?.visibility = View.VISIBLE
-                    controlOverlay?.bringToFront()
+                    collapsedControl?.visibility = View.VISIBLE
+                    collapsedControl?.bringToFront()
                     lorieView?.requestFocus()
                 }
                 ?.start()
@@ -570,6 +593,7 @@ class DesktopActivity : Activity() {
         inputController = null
         x11ServiceClient?.disconnect()
         x11ServiceClient = null
+        if (current?.get() === this) current = null
         super.onDestroy()
     }
 }

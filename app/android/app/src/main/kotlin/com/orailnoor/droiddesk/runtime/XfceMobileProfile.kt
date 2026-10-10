@@ -7,8 +7,14 @@ import java.io.File
 /** Installs DroidDesk's touch-friendly Ubuntu-inspired XFCE defaults once per home. */
 object XfceMobileProfile {
     private const val TAG = "XfceMobileProfile"
-    private const val PROFILE_MARKER = ".droiddesk-xfce-mobile-v5"
+    private const val PROFILE_MARKER = ".droiddesk-xfce-mobile-v8"
     private const val WALLPAPER_ASSET = "droiddesk/ubuntu-touch-wallpaper.jpg"
+
+    /** Height of the bottom launcher dock in X11 pixels; Android overlays sit above it. */
+    const val DOCK_SIZE_PX = 48
+
+    /** True when the current profile still needs to be (re)installed in [homeDir]. */
+    fun needsInstall(homeDir: File): Boolean = !File(homeDir, PROFILE_MARKER).exists()
 
     fun install(
         context: Context,
@@ -33,7 +39,10 @@ object XfceMobileProfile {
             File(xfconfDir, "xfce4-desktop.xml").writeText(
                 desktopConfig(xmlEscape(wallpaperPathInSession)),
             )
+            File(xfconfDir, "xfwm4.xml").writeText(windowManagerConfig())
+            File(xfconfDir, "xsettings.xml").writeText(xsettingsConfig())
             installPanelCss(homeDir)
+            installAutoMaximize(homeDir)
 
             val panelDir = File(homeDir, ".config/xfce4/panel")
             writeLauncher(
@@ -97,12 +106,8 @@ object XfceMobileProfile {
         val endMarker = "/* DroidDesk mobile panel end */"
         val managedBlock = """
             $startMarker
-            .xfce4-panel #separator-4,
-            .xfce4-panel #separator-5,
-            .xfce4-panel #separator-6 {
-              min-width: 52px;
-              padding: 0;
-              margin: 0;
+            .xfce4-panel button {
+              padding: 4px 8px;
             }
             $endMarker
         """.trimIndent()
@@ -119,6 +124,71 @@ object XfceMobileProfile {
             else "$withoutOldBlock\n\n$managedBlock\n",
         )
     }
+
+    /** Maximizes every normal window so apps never open wider than a portrait phone screen. */
+    private fun installAutoMaximize(homeDir: File) {
+        File(homeDir, ".config/devilspie2/droiddesk-maximize.lua").apply {
+            parentFile?.mkdirs()
+            writeText(
+                """
+                -- Managed by DroidDesk: dialogs, menus and splash screens keep their own size.
+                if get_window_type() == "WINDOW_TYPE_NORMAL" then
+                  -- Fit the window to the screen first so "restore" returns to a size
+                  -- that is still usable on a phone, then open it maximized.
+                  if get_screen_geometry then
+                    local screen_w, screen_h = get_screen_geometry()
+                    local w = math.floor(screen_w * 0.9)
+                    local h = math.floor(screen_h * 0.8)
+                    set_window_geometry(math.floor((screen_w - w) / 2), math.floor((screen_h - h) / 2), w, h)
+                  end
+                  maximize()
+                end
+                """.trimIndent() + "\n",
+            )
+        }
+        File(homeDir, ".config/autostart/droiddesk-automax.desktop").apply {
+            parentFile?.mkdirs()
+            writeText(
+                """
+                [Desktop Entry]
+                Type=Application
+                Name=DroidDesk window fitting
+                Comment=Maximize new windows on small screens
+                Exec=sh -c 'command -v devilspie2 >/dev/null 2>&1 && exec devilspie2'
+                OnlyShowIn=XFCE;
+                NoDisplay=true
+                """.trimIndent() + "\n",
+            )
+        }
+    }
+
+    private fun windowManagerConfig(): String = """
+        <?xml version="1.1" encoding="UTF-8"?>
+
+        <channel name="xfwm4" version="1.0">
+          <property name="general" type="empty">
+            <property name="theme" type="string" value="Default-hdpi"/>
+            <property name="button_layout" type="string" value="O|HMC"/>
+            <property name="placement_ratio" type="int" value="100"/>
+            <property name="tile_on_move" type="bool" value="true"/>
+            <property name="snap_to_border" type="bool" value="true"/>
+            <property name="wrap_windows" type="bool" value="false"/>
+            <property name="easy_click" type="string" value="Alt"/>
+          </property>
+        </channel>
+    """.trimIndent() + "\n"
+
+    private fun xsettingsConfig(): String = """
+        <?xml version="1.1" encoding="UTF-8"?>
+
+        <channel name="xsettings" version="1.0">
+          <property name="Gtk" type="empty">
+            <property name="CursorThemeSize" type="int" value="32"/>
+            <property name="ButtonImages" type="bool" value="false"/>
+            <property name="DialogsUseHeader" type="bool" value="true"/>
+          </property>
+        </channel>
+    """.trimIndent() + "\n"
 
     private fun panelConfig(): String = """
         <?xml version="1.1" encoding="UTF-8"?>
@@ -144,23 +214,20 @@ object XfceMobileProfile {
                 <value type="double" value="1.000000"/>
               </property>
               <property name="plugin-ids" type="array">
-                <value type="int" value="4"/>
-                <value type="int" value="5"/>
-                <value type="int" value="6"/>
                 <value type="int" value="2"/>
                 <value type="int" value="1"/>
                 <value type="int" value="3"/>
               </property>
             </property>
             <property name="panel-2" type="empty">
-              <property name="position" type="string" value="p=7;x=0;y=0"/>
-              <property name="mode" type="uint" value="1"/>
+              <property name="position" type="string" value="p=10;x=0;y=0"/>
+              <property name="mode" type="uint" value="0"/>
               <property name="length" type="uint" value="100"/>
               <property name="length-adjust" type="bool" value="false"/>
               <property name="position-locked" type="bool" value="true"/>
               <property name="autohide-behavior" type="uint" value="0"/>
-              <property name="size" type="uint" value="52"/>
-              <property name="icon-size" type="uint" value="36"/>
+              <property name="size" type="uint" value="$DOCK_SIZE_PX"/>
+              <property name="icon-size" type="uint" value="32"/>
               <property name="background-style" type="uint" value="1"/>
               <property name="background-rgba" type="array">
                 <value type="double" value="0.000000"/>
@@ -188,18 +255,6 @@ object XfceMobileProfile {
               <property name="grouping" type="uint" value="1"/>
             </property>
             <property name="plugin-3" type="string" value="clock"/>
-            <property name="plugin-4" type="string" value="separator">
-              <property name="expand" type="bool" value="false"/>
-              <property name="style" type="uint" value="0"/>
-            </property>
-            <property name="plugin-5" type="string" value="separator">
-              <property name="expand" type="bool" value="false"/>
-              <property name="style" type="uint" value="0"/>
-            </property>
-            <property name="plugin-6" type="string" value="separator">
-              <property name="expand" type="bool" value="false"/>
-              <property name="style" type="uint" value="0"/>
-            </property>
             <property name="plugin-20" type="string" value="applicationsmenu">
               <property name="show-button-title" type="bool" value="false"/>
             </property>
